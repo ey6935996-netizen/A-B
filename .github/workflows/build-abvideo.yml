@@ -1,0 +1,116 @@
+name: Build ABVideo ModernSoft
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'abvideo-build/**'
+      - '.github/workflows/build-abvideo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout build workspace
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.302'
+
+      - name: Reassemble source archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = @(Get-ChildItem -LiteralPath 'abvideo-build' -Filter 'source.part-*.b64' | Sort-Object Name)
+          if ($parts.Count -eq 0) { throw 'Source archive parts were not found.' }
+          $builder = [System.Text.StringBuilder]::new()
+          foreach ($part in $parts) {
+            [void]$builder.Append((Get-Content -LiteralPath $part.FullName -Raw -Encoding ASCII).Trim())
+          }
+          $bytes = [Convert]::FromBase64String($builder.ToString())
+          [IO.File]::WriteAllBytes((Join-Path $PWD 'abvideo-source.tar.xz'), $bytes)
+          $actual = (Get-FileHash -LiteralPath 'abvideo-source.tar.xz' -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = (Get-Content -LiteralPath 'abvideo-build/source.sha256' -Raw).Trim().ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Source archive hash mismatch: $actual" }
+          New-Item -ItemType Directory -Path 'source' -Force | Out-Null
+          tar -xf 'abvideo-source.tar.xz' -C 'source'
+          if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+
+      - name: Restore and publish Windows x64 app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location 'source'
+          try {
+            dotnet restore '.\src\ABVideo.App\ABVideo.App.csproj' -r win-x64
+            if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed: $LASTEXITCODE" }
+            dotnet publish '.\src\ABVideo.App\ABVideo.App.csproj' `
+              --configuration Release `
+              --runtime win-x64 `
+              --self-contained true `
+              -p:PublishSingleFile=true `
+              -p:IncludeNativeLibrariesForSelfExtract=true `
+              -p:DebugType=None `
+              -p:DebugSymbols=false `
+              --output '..\package'
+            if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed: $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+          if (-not (Test-Path -LiteralPath 'package/ABVideo.exe' -PathType Leaf)) {
+            throw 'Published ABVideo.exe was not found.'
+          }
+
+      - name: Bundle FFmpeg and launcher notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'package/tools/ffmpeg' -Force | Out-Null
+          curl.exe -L --fail --retry 3 --retry-delay 5 `
+            'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' `
+            -o 'ffmpeg-release-essentials.zip'
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg download failed: $LASTEXITCODE" }
+          Expand-Archive -LiteralPath 'ffmpeg-release-essentials.zip' -DestinationPath 'ffmpeg-unpacked' -Force
+          $ffmpeg = Get-ChildItem -LiteralPath 'ffmpeg-unpacked' -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          $ffprobe = Get-ChildItem -LiteralPath 'ffmpeg-unpacked' -Recurse -Filter 'ffprobe.exe' | Select-Object -First 1
+          if ($null -eq $ffmpeg -or $null -eq $ffprobe) { throw 'FFmpeg binaries were not found after extraction.' }
+          Copy-Item -LiteralPath $ffmpeg.FullName -Destination 'package/tools/ffmpeg/ffmpeg.exe' -Force
+          Copy-Item -LiteralPath $ffprobe.FullName -Destination 'package/tools/ffmpeg/ffprobe.exe' -Force
+          @(
+            'ABVideo 4.0 ModernSoft - Windows x64 免安装版',
+            '',
+            '启动方法：解压全部文件后，双击 ABVideo.exe。',
+            '请勿只把 ABVideo.exe 单独移出文件夹；tools 目录中的 FFmpeg 用于视频处理。',
+            '',
+            '本构建为未签名测试版，Windows SmartScreen 如出现提示，请先确认文件来源。'
+          ) | Set-Content -LiteralPath 'package/启动说明.txt' -Encoding UTF8
+
+      - name: Create downloadable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'ABVideo-ModernSoft-4.0-win-x64-portable.zip'
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path 'package/*' -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$zip.sha256.txt" -Value "$hash  $zip" -Encoding ASCII
+
+      - name: Upload runnable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ABVideo-ModernSoft-4.0-win-x64-portable
+          path: |
+            ABVideo-ModernSoft-4.0-win-x64-portable.zip
+            ABVideo-ModernSoft-4.0-win-x64-portable.zip.sha256.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
