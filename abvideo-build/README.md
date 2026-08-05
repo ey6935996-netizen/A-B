@@ -1,3 +1,5 @@
 # ABVideo Windows Build Input
 
-This branch contains a temporary source archive and workflow input for producing the ABVideo ModernSoft Windows x64 portable preview.
+Binary source archive staged for the Windows x64 portable build.
+
+Build trigger: 2026-08-05T09:36Z
