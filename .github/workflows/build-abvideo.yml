@@ -26,7 +26,7 @@ jobs:
         with:
           dotnet-version: '10.0.302'
 
-      - name: Reconstruct source archive from issue chunks
+      - name: Reconstruct and patch source archive
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,8 +53,7 @@ jobs:
             $count = [int]$match.Groups[2].Value
             if ($null -eq $expectedCount) { $expectedCount = $count }
             if ($expectedCount -ne $count) { throw "Inconsistent source chunk count: $count" }
-            $payload = $match.Groups[3].Value -replace '\s', ''
-            $chunks[$index] = $payload
+            $chunks[$index] = $match.Groups[3].Value -replace '\s', ''
           }
 
           if ($null -eq $expectedCount) { throw 'No ABVideo source chunks were found in issue #3.' }
@@ -69,8 +68,7 @@ jobs:
           }
 
           $archive = 'abvideo-source.tar.xz'
-          $bytes = [Convert]::FromBase64String($builder.ToString())
-          [IO.File]::WriteAllBytes((Join-Path $PWD $archive), $bytes)
+          [IO.File]::WriteAllBytes((Join-Path $PWD $archive), [Convert]::FromBase64String($builder.ToString()))
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $expected = (Get-Content -LiteralPath 'abvideo-build/source.sha256' -Raw).Trim().ToLowerInvariant()
           if ($actual -ne $expected) {
@@ -80,6 +78,14 @@ jobs:
           New-Item -ItemType Directory -Path 'source' -Force | Out-Null
           tar -xf $archive -C 'source'
           if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+
+          $projectWorkspace = 'source/src/ABVideo.App/ViewModels/MainViewModel.ProjectWorkspace.cs'
+          $sourceText = [IO.File]::ReadAllText($projectWorkspace)
+          if ($sourceText -notmatch '(?m)^using ABVideo\.Core\.Editing;') {
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            [IO.File]::WriteAllText($projectWorkspace, "using ABVideo.Core.Editing;`r`n" + $sourceText, $utf8)
+          }
+
           if (-not (Test-Path -LiteralPath 'source/src/ABVideo.App/ABVideo.App.csproj' -PathType Leaf)) {
             throw 'ABVideo.App.csproj was not found after extraction.'
           }
@@ -88,7 +94,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          dotnet --info
           dotnet restore '.\source\src\ABVideo.App\ABVideo.App.csproj' --runtime win-x64
           if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed: $LASTEXITCODE" }
           dotnet publish '.\source\src\ABVideo.App\ABVideo.App.csproj' `
