@@ -45,8 +45,8 @@ jobs:
           $chunks = @{}
           $expectedCount = $null
           $sourcePattern = '(?s)ABVIDEO_SOURCE_CHUNK_BEGIN\s+(\d{3})\s+(\d{3})\s*\r?\n(.*?)\r?\nABVIDEO_SOURCE_CHUNK_END\s+\1'
-          $patchPattern = '(?s)ABVIDEO_UI_PATCH_BEGIN\s*\r?\n(.*?)\r?\nABVIDEO_UI_PATCH_END'
-          $uiPatch = $null
+          $patchPattern = '(?s)ABVIDEO_UI_PATCH_B64_BEGIN\s*\r?\n(.*?)\r?\nABVIDEO_UI_PATCH_B64_END'
+          $uiPatchBase64 = $null
 
           foreach ($comment in $comments) {
             $body = [string]$comment.body
@@ -61,7 +61,7 @@ jobs:
 
             $patchMatch = [regex]::Match($body, $patchPattern)
             if ($patchMatch.Success) {
-              $uiPatch = $patchMatch.Groups[1].Value
+              $uiPatchBase64 = $patchMatch.Groups[1].Value -replace '\s', ''
             }
           }
 
@@ -69,7 +69,7 @@ jobs:
           if ($chunks.Count -ne $expectedCount) {
             throw "Source chunk count mismatch. Expected $expectedCount, found $($chunks.Count)."
           }
-          if ([string]::IsNullOrWhiteSpace($uiPatch)) { throw 'The ABVideo UI patch was not found in issue #3.' }
+          if ([string]::IsNullOrWhiteSpace($uiPatchBase64)) { throw 'The Base64 ABVideo UI patch was not found in issue #3.' }
 
           $builder = [System.Text.StringBuilder]::new()
           for ($i = 0; $i -lt $expectedCount; $i++) {
@@ -90,8 +90,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
 
           $patchPath = Join-Path $PWD 'abvideo-ui-v2.patch'
-          $normalizedPatch = $uiPatch.Replace("`r`n", "`n")
-          [IO.File]::WriteAllText($patchPath, $normalizedPatch, [System.Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllBytes($patchPath, [Convert]::FromBase64String($uiPatchBase64))
           git apply --check --directory=source --whitespace=nowarn $patchPath
           if ($LASTEXITCODE -ne 0) { throw "UI patch validation failed: $LASTEXITCODE" }
           git apply --directory=source --whitespace=nowarn $patchPath
