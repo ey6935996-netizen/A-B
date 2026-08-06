@@ -26,7 +26,7 @@ jobs:
         with:
           dotnet-version: '10.0.302'
 
-      - name: Reconstruct and patch source archive
+      - name: Reconstruct source and apply UI patch
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,25 +41,35 @@ jobs:
           }
           $uri = "https://api.github.com/repos/$env:GH_REPOSITORY/issues/3/comments?per_page=100"
           $comments = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
+
           $chunks = @{}
           $expectedCount = $null
-          $pattern = '(?s)ABVIDEO_SOURCE_CHUNK_BEGIN\s+(\d{3})\s+(\d{3})\s*\r?\n(.*?)\r?\nABVIDEO_SOURCE_CHUNK_END\s+\1'
+          $sourcePattern = '(?s)ABVIDEO_SOURCE_CHUNK_BEGIN\s+(\d{3})\s+(\d{3})\s*\r?\n(.*?)\r?\nABVIDEO_SOURCE_CHUNK_END\s+\1'
+          $patchPattern = '(?s)ABVIDEO_UI_PATCH_BEGIN\s*\r?\n(.*?)\r?\nABVIDEO_UI_PATCH_END'
+          $uiPatch = $null
 
           foreach ($comment in $comments) {
             $body = [string]$comment.body
-            $match = [regex]::Match($body, $pattern)
-            if (-not $match.Success) { continue }
-            $index = [int]$match.Groups[1].Value
-            $count = [int]$match.Groups[2].Value
-            if ($null -eq $expectedCount) { $expectedCount = $count }
-            if ($expectedCount -ne $count) { throw "Inconsistent source chunk count: $count" }
-            $chunks[$index] = $match.Groups[3].Value -replace '\s', ''
+            $sourceMatch = [regex]::Match($body, $sourcePattern)
+            if ($sourceMatch.Success) {
+              $index = [int]$sourceMatch.Groups[1].Value
+              $count = [int]$sourceMatch.Groups[2].Value
+              if ($null -eq $expectedCount) { $expectedCount = $count }
+              if ($expectedCount -ne $count) { throw "Inconsistent source chunk count: $count" }
+              $chunks[$index] = $sourceMatch.Groups[3].Value -replace '\s', ''
+            }
+
+            $patchMatch = [regex]::Match($body, $patchPattern)
+            if ($patchMatch.Success) {
+              $uiPatch = $patchMatch.Groups[1].Value
+            }
           }
 
           if ($null -eq $expectedCount) { throw 'No ABVideo source chunks were found in issue #3.' }
           if ($chunks.Count -ne $expectedCount) {
             throw "Source chunk count mismatch. Expected $expectedCount, found $($chunks.Count)."
           }
+          if ([string]::IsNullOrWhiteSpace($uiPatch)) { throw 'The ABVideo UI patch was not found in issue #3.' }
 
           $builder = [System.Text.StringBuilder]::new()
           for ($i = 0; $i -lt $expectedCount; $i++) {
@@ -79,16 +89,19 @@ jobs:
           tar -xf $archive -C 'source'
           if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
 
-          $projectWorkspace = 'source/src/ABVideo.App/ViewModels/MainViewModel.ProjectWorkspace.cs'
-          $sourceText = [IO.File]::ReadAllText($projectWorkspace)
-          if ($sourceText -notmatch '(?m)^using ABVideo\.Core\.Editing;') {
-            $utf8 = [System.Text.UTF8Encoding]::new($false)
-            [IO.File]::WriteAllText($projectWorkspace, "using ABVideo.Core.Editing;`r`n" + $sourceText, $utf8)
-          }
+          $patchPath = Join-Path $PWD 'abvideo-ui-v2.patch'
+          $normalizedPatch = $uiPatch.Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($patchPath, $normalizedPatch, [System.Text.UTF8Encoding]::new($false))
+          git apply --check --directory=source --whitespace=nowarn $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "UI patch validation failed: $LASTEXITCODE" }
+          git apply --directory=source --whitespace=nowarn $patchPath
+          if ($LASTEXITCODE -ne 0) { throw "UI patch application failed: $LASTEXITCODE" }
 
-          if (-not (Test-Path -LiteralPath 'source/src/ABVideo.App/ABVideo.App.csproj' -PathType Leaf)) {
-            throw 'ABVideo.App.csproj was not found after extraction.'
-          }
+          $projectFile = 'source/src/ABVideo.App/ABVideo.App.csproj'
+          $projectText = [IO.File]::ReadAllText($projectFile)
+          $projectText = $projectText.Replace('<Version>4.0.0</Version>', '<Version>4.0.1</Version>')
+          $projectText = $projectText.Replace('<InformationalVersion>4.0.0</InformationalVersion>', '<InformationalVersion>4.0.1</InformationalVersion>')
+          [IO.File]::WriteAllText($projectFile, $projectText, [System.Text.UTF8Encoding]::new($false))
 
       - name: Restore and publish Windows x64 app
         shell: pwsh
@@ -127,19 +140,18 @@ jobs:
           Copy-Item -LiteralPath $ffmpeg.FullName -Destination 'package/tools/ffmpeg/ffmpeg.exe' -Force
           Copy-Item -LiteralPath $ffprobe.FullName -Destination 'package/tools/ffmpeg/ffprobe.exe' -Force
           @(
-            'ABVideo 4.0 ModernSoft - Windows x64 免安装版',
+            'ABVideo 4.0.1 ModernSoft - Windows x64 免安装版',
             '',
+            '本版已拆分“组合制作”和“素材管理”的职责，并加入 ABVideo 应用图标。',
             '启动方法：解压全部文件后，双击 ABVideo.exe。',
-            '请勿只把 ABVideo.exe 单独移出文件夹；tools 目录中的 FFmpeg 用于视频处理。',
-            '',
-            '本构建为未签名测试版，Windows SmartScreen 如出现提示，请先确认文件来源。'
+            '请勿只把 ABVideo.exe 单独移出文件夹；tools 目录中的 FFmpeg 用于视频处理。'
           ) | Set-Content -LiteralPath 'package/启动说明.txt' -Encoding UTF8
 
       - name: Create downloadable ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zip = 'ABVideo-ModernSoft-4.0-win-x64-portable.zip'
+          $zip = 'ABVideo-ModernSoft-4.0.1-win-x64-portable.zip'
           if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
           Compress-Archive -Path 'package/*' -DestinationPath $zip -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -148,10 +160,10 @@ jobs:
       - name: Upload runnable package
         uses: actions/upload-artifact@v4
         with:
-          name: ABVideo-ModernSoft-4.0-win-x64-portable
+          name: ABVideo-ModernSoft-4.0.1-win-x64-portable
           path: |
-            ABVideo-ModernSoft-4.0-win-x64-portable.zip
-            ABVideo-ModernSoft-4.0-win-x64-portable.zip.sha256.txt
+            ABVideo-ModernSoft-4.0.1-win-x64-portable.zip
+            ABVideo-ModernSoft-4.0.1-win-x64-portable.zip.sha256.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
